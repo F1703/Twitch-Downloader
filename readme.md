@@ -58,5 +58,5 @@ sudo apt update && sudo apt install -y jq ffmpeg wget findutils
 
 Puedes ver una demostración completa del funcionamiento del script en el siguiente video:
 
-[▶️ Ver demostración](video/video.mp4)
-
+![Demo GIF](video/video.gif)
+ 
