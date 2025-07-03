@@ -19,7 +19,7 @@ DEPENDENCIAS=(jq ffmpeg xargs)
 
 for cmd in "${DEPENDENCIAS[@]}"; do
     if ! command -v "$cmd" &>/dev/null; then
-        echo -e "❌ La herramienta '$cmd' no está instalada. Por favor instalala antes de continuar."
+        echo -e "${yellowColour}[-] La herramienta '$cmd' no está instalada. Por favor instalala antes de continuar.${endColour}"
         exit 1
     fi
 done
@@ -59,8 +59,8 @@ procesar() {
   
     url="https://player.twitch.tv/?autoplay=true&parent=meta.tag&player=facebook&video=$vodID"
 
-    curl -s -X GET  $url  -c $cookie  -H 'User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:108.0) Gecko/20100101 Firefox/108.0' >/dev/null
-    device_id=$(cat $cookie | grep unique_id | head -1 | awk '{print $NF}')
+    curl -s -X GET  "$url"  -c $cookie  -H 'User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:108.0) Gecko/20100101 Firefox/108.0' >/dev/null
+    device_id=$(grep -i "unique_id_durable" "$cookie" | awk '{print $NF}')
 
     payload=$(jq -n --arg vodID "$vodID" '{
         operationName: "PlaybackAccessToken_Template",
@@ -83,53 +83,93 @@ procesar() {
         -H 'origin: https://player.twitch.tv' \
         -H 'referer: https://player.twitch.tv/' \
         -H 'user-agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36' \
-        --data-raw "$payload" > $output
+        --data-raw "$payload" > "$folder_data$output"
 
+    if ! jq empty "$folder_data$output" 2>/dev/null; then
+        echo -e "${yellowColour}[-] JSON no válido. Abortando.${endColour}"
+        exit 1
+    fi
 
-    signature=$(cat $output | jq -r '.data.videoPlaybackAccessToken.signature')
-    expires=$(cat $output | jq -r '.data.videoPlaybackAccessToken.value' | jq -r '.expires')
+    signature=$(cat "$folder_data$output" | jq -r '.data.videoPlaybackAccessToken.signature')
+    expires=$(cat "$folder_data$output" | jq -r '.data.videoPlaybackAccessToken.value' | jq -r '.expires')
+
+    if [[ -z "$signature" ]]; then
+        echo -e "${yellowColour}[-] No se pudo obtener un signature válido. Abortando.${endColour}"
+        exit 1
+    fi
 
     curl -s 'https://usher.ttvnw.net/vod/'$vodID'.m3u8?acmb=&allow_source=true&browser_family=chrome&browser_version=136.0&cdm=wv&enable_score=true&include_unavailable=true&os_name=Linux&os_version=undefined&p=2366355&platform=web&player_backend=mediaplayer&player_version=1.42.0-rc.1&playlist_include_framerate=true&reassignments_supported=true&sig='$signature'&supported_codecs=av1,h264&token=%7B%22authorization%22%3A%7B%22forbidden%22%3Afalse%2C%22reason%22%3A%22%22%7D%2C%22chansub%22%3A%7B%22restricted_bitrates%22%3A%5B%5D%7D%2C%22device_id%22%3A%22'$device_id'%22%2C%22expires%22%3A'$expires'%2C%22https_required%22%3Atrue%2C%22privileged%22%3Afalse%2C%22user_id%22%3Anull%2C%22version%22%3A3%2C%22vod_id%22%3A'$vodID'%2C%22maximum_resolution%22%3A%22FULL_HD%22%2C%22maximum_video_bitrate_kbps%22%3A12500%2C%22maximum_resolution_reasons%22%3A%7B%22QUAD_HD%22%3A%5B%22AUTHZ_NOT_LOGGED_IN%22%5D%2C%22ULTRA_HD%22%3A%5B%22AUTHZ_NOT_LOGGED_IN%22%5D%7D%2C%22maximum_video_bitrate_kbps_reasons%22%3A%5B%22AUTHZ_DISALLOWED_BITRATE%22%5D%7D&transcode_mode=cbr_v1' \
         -H 'User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36' \
         -H 'Accept: application/x-mpegURL, application/vnd.apple.mpegurl, application/json, text/plain' \
-        -H 'Referer;' > "$file_m3u8"
+        -H 'Referer;' > "$folder_data$file_m3u8"
 
 
-    url_file=$(cat "$file_m3u8" | grep http | grep "$r_default" | head -1)
+    url_file=$(cat "$folder_data$file_m3u8" | grep http | grep "$r_default" | head -1)
 
     if [[ -z "$url_file" ]]; then
-        echo -e "${yellowColour}[-]${endColour}${whiteColor} No se encontró una URL válida. Saliendo...${endColour}"
+        echo -e "${yellowColour}[-] No se encontró una URL válida. Saliendo...${endColour}"
         exit 1
     fi
 
-    curl -s -X GET "$url_file" > "$base.$r_default.m3u8"
+    curl -s -X GET "$url_file" > "$folder_data$base.$r_default.m3u8"
 
     last_part=$(echo "$url_file" | awk '{print $NF}' FS='/')
     url_video=$(echo "$url_file" | awk -F $last_part '{print $1}')
     
     echo -e "${yellowColour}[+]${endColour}${whiteColor} Descargado todas las de partes de video ${endColour}"
-    cat "$base.$r_default.m3u8" | grep .ts | xargs -n1 -P $hilos -I {} bash -c 'wget --tries=0  --no-check-certificate --retry-connrefused --wait=2 --quiet --show-progress --continue '$url_video'{} --output-document='$folder_parts'{}.mp4' || cat $file_m3u8 | grep .ts | xargs -n1 -P $hilos -I {} bash -c 'wget --tries=0   --retry-connrefused --wait=2 --quiet --no-check-certificate --continue '$url_video'{} --output-document='$folder_parts'{}.mp4'
+    
+    ts_list=$(grep .ts "$folder_data$base.$r_default.m3u8")
+    [ -z "$ts_list" ] && ts_list=$(grep .ts "$folder_data$file_m3u8")
+
+    # CONTAR CANTIDAD DE ARCHIVOS TS 
+    total_parts=$(echo "$ts_list" | wc -l)
+    echo -e "${yellowColour}[+]${endColour}${whiteColor} Total de partes a descargar: $total_parts ${endColour}"
+
+    # DESCARGANDO EN PARALELO CON XARGS Y WGET (wget ya que me permite reconectar la parte descargada)
+    echo "$ts_list" | nl | xargs -n2 -P "$hilos" -I {} bash -c '
+        line=($0)
+        num=${line[0]}
+        part=${line[1]}
+        
+        echo "[#$num/'$total_parts'] ⏳ Descargando $part" >&2
+        wget --tries=0 \
+            --no-check-certificate \
+            --retry-connrefused \
+            --wait=1 \
+            --quiet \
+            --continue \
+            "'"$url_video"'$part" \
+            --output-document="'"$folder_parts"'$part.mp4" && \
+        echo "[#$num/'$total_parts'] ✅ Completado $part" >&2
+    ' {}
     wait 
 
-    # UNIENDO LAS PARTES DE LOS VIDEOS
+    # GENERANDO LISTADO DE TS DESCARGADOS
     filesMP4=$vodID"_"$r_default"/files.txt" 
-    rm -fr $filesMP4 2>/dev/null
-    cat "$base.$r_default.m3u8" | grep .ts | xargs -n1 -I {} echo "file 'parts/{}.mp4'" >> $filesMP4
-    wait 
-
-    rm -fr "$base.$r_default.m3u8"
-    rm -fr $output
-    rm -fr $file_m3u8
+    echo "$ts_list" | xargs -n1 -I {} echo "file 'parts/{}.mp4'" >> $filesMP4
 
     # UNIENDO VIDEOS
-    logError=$folder_data"ffmpeg.error.log"
-    logInfo=$folder_data"ffmpeg.info.log"
+    logInfo=$folder_data"ffmpeg.log"
     time=$(date +%H%M%S)
-    echo -e   "${yellowColour}[+]${endColour}${whiteColor} Uniendo partes de los videos con ffmpeg...${endColour}"
     video=$vodID"_"$r_default"/"$vodID"_"$r_default"_"$time".mp4"
-    ffmpeg -safe 0  -f concat -i $filesMP4  -bsf:a aac_adtstoasc  -vcodec copy $video 2>$logError 1>$logInfo
+
+    echo -e   "${yellowColour}[+]${endColour}${whiteColor} Uniendo partes con ffmpeg.${endColour}"
+
+    ffmpeg -safe 0  -f concat -i $filesMP4  -bsf:a aac_adtstoasc  -vcodec copy $video >$logInfo 2>&1 
+
+    if [[ $? -ne 0 ]]; then
+        echo -e "${yellowColour}[-] Error al unir video. Verifica el log: $logInfo${endColour}"
+        exit 1
+    fi
+
     echo  -e  "${yellowColour}[+]${endColour}${whiteColor} Proceso terminado. ${endColour}"
     echo  -e  "${yellowColour}[+]${endColour}${whiteColor} Video: $video ${endColour}"
+
+    rm -fr "$filesMP4" 2>/dev/null
+    rm -fr "$folder_data$base.$r_default.m3u8"
+    rm -fr "$folder_data$output"
+    rm -fr "$folder_data$file_m3u8"
+
     exit 0
 
 }
@@ -141,6 +181,11 @@ listar_videos() {
 
     curl -s -c $cookie -H 'user-agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36'  "https://www.twitch.tv/$channelOwnerLogin/about" >/dev/null 2>&1
     unique_id_durable=$(grep -i "unique_id_durable" "$cookie" | awk '{print $NF}')
+
+    if [[ -z "$unique_id_durable" ]]; then
+        echo -e "${yellowColour}[-] No se encontró un id válido. Saliendo.${endColour}"
+        exit 1
+    fi
 
     YEAR=$(date +%Y)
 
@@ -176,7 +221,6 @@ listar_videos() {
             -H 'client-id: kimne78kx3ncx6brgo4mv6wki5h1ko' \
             -H 'origin: https://www.twitch.tv' \
             -H 'referer: https://www.twitch.tv/' \
-            -H 'sec-ch-ua: "Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"' \
             -H 'user-agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36' \
             -H 'x-device-id: '$unique_id_durable \
             --data-raw  "$payload" > $output
