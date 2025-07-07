@@ -7,8 +7,8 @@ whiteColor="\e[0;37m\033[1m"
 yellowColour="\e[0;33m\033[1m"
 
 cookie=/tmp/cookies_tw.txt
-r_default=720
-hilos_default=200 
+r_default=720p
+hilos_default=100 
  
 base=$(basename $0)
 output="$base.json"
@@ -46,9 +46,8 @@ modo_uso() {
 
 procesar() {
     vodID=$OPTARG_C
-    r_default=$([[ $OPTARG_R -ne "" ]] && echo $OPTARG_R || echo $r_default )
+    r_default=$([[ $OPTARG_R -ne "" ]] && echo $OPTARG_R"p"  || echo $r_default )
     if [[ $OPTARG_R -eq "1080"  ]] ; then r_default=chunked ; fi 
-
     hilos=$([[ $OPTARG_W -ne "" ]] && echo $OPTARG_W || echo $hilos_default )
 
     folder_parts=$vodID"_$r_default/parts/"
@@ -90,8 +89,8 @@ procesar() {
         exit 1
     fi
 
-    signature=$(cat "$folder_data$output" | jq -r '.data.videoPlaybackAccessToken.signature')
-    expires=$(cat "$folder_data$output" | jq -r '.data.videoPlaybackAccessToken.value' | jq -r '.expires')
+    signature=$(jq -r '.data.videoPlaybackAccessToken.signature' "$folder_data$output")
+    expires=$(jq -r '.data.videoPlaybackAccessToken.value' "$folder_data$output" | jq -r '.expires')
 
     if [[ -z "$signature" ]]; then
         echo -e "${yellowColour}[-] No se pudo obtener un signature válido. Abortando.${endColour}"
@@ -103,8 +102,7 @@ procesar() {
         -H 'Accept: application/x-mpegURL, application/vnd.apple.mpegurl, application/json, text/plain' \
         -H 'Referer;' > "$folder_data$file_m3u8"
 
-
-    url_file=$(cat "$folder_data$file_m3u8" | grep http | grep "$r_default" | head -1)
+    url_file=$(grep http "$folder_data$file_m3u8" | grep "$r_default" | head -1)
 
     if [[ -z "$url_file" ]]; then
         echo -e "${yellowColour}[-] No se encontró una URL válida. Saliendo...${endColour}"
@@ -118,32 +116,75 @@ procesar() {
     
     echo -e "${yellowColour}[+]${endColour}${whiteColor} Descargado todas las de partes de video ${endColour}"
     
-    ts_list=$(grep .ts "$folder_data$base.$r_default.m3u8")
-    [ -z "$ts_list" ] && ts_list=$(grep .ts "$folder_data$file_m3u8")
+    ts_list=$(grep "\.ts" "$folder_data$base.$r_default.m3u8")
+    [ -z "$ts_list" ] && ts_list=$(grep "\.ts" "$folder_data$file_m3u8")
 
     # CONTAR CANTIDAD DE ARCHIVOS TS 
     total_parts=$(echo "$ts_list" | wc -l)
     echo -e "${yellowColour}[+]${endColour}${whiteColor} Total de partes a descargar: $total_parts ${endColour}"
 
     # DESCARGANDO EN PARALELO CON XARGS Y WGET (wget ya que me permite reconectar la parte descargada)
+    max_retries=4
+    fail_log=$(mktemp)
+
     echo "$ts_list" | nl | xargs -n2 -P "$hilos" -I {} bash -c '
         line=($0)
         num=${line[0]}
         part=${line[1]}
-        
-        echo "[#$num/'$total_parts'] ⏳ Descargando $part" >&2
-        wget --tries=0 \
-            --no-check-certificate \
-            --retry-connrefused \
-            --wait=1 \
-            --quiet \
-            --continue \
-            "'"$url_video"'$part" \
-            --output-document="'"$folder_parts"'$part.mp4" && \
-        echo "[#$num/'$total_parts'] ✅ Completado $part" >&2
-    ' {}
-    wait 
+        part_path="'"$folder_parts"'$part.mp4"
 
+        echo "[#$num/'$total_parts'] ⏳ Descargando $part" >&2
+
+        for attempt in $(seq 1 '"$max_retries"'); do
+            wget --tries=1 \
+                --no-check-certificate \
+                --retry-connrefused \
+                --wait=1 \
+                --quiet \
+                --continue \
+                "'"$url_video"'$part" \
+                --output-document="$part_path"
+
+            if [[ -s "$part_path" ]]; then
+                echo "[#$num/'$total_parts'] ✅ Completado $part" >&2
+                break
+            else
+                echo "[#$num/'$total_parts'] ❌ Falló intento $attempt para $part" >&2
+                sleep 1
+            fi
+        done
+
+        if [[ ! -s "$part_path" ]]; then
+            echo "$part" >> "'"$fail_log"'"
+        fi
+    ' {}
+
+    wait
+
+    # Reintentar archivos fallidos
+    if [[ -s "$fail_log" ]]; then
+        echo "🔁 Reintentando fragmentos fallidos:" >&2
+        while read part; do
+            echo "↩️ Reintentando $part..." >&2
+            wget --tries=4 \
+                --no-check-certificate \
+                --retry-connrefused \
+                --wait=2 \
+                --quiet \
+                --continue \
+                "$url_video$part" \
+                --output-document="$folder_parts$part.mp4"
+
+            if [[ -s "$folder_parts$part.mp4" ]]; then
+                echo "✅ Reintento exitoso: $part" >&2
+            else
+                echo "❌ Aún fallido tras reintentos: $part" >&2
+            fi
+        done < "$fail_log" 
+    fi
+
+    rm -f "$fail_log"
+    
     # GENERANDO LISTADO DE TS DESCARGADOS
     filesMP4=$vodID"_"$r_default"/files.txt" 
     echo "$ts_list" | xargs -n1 -I {} echo "file 'parts/{}.mp4'" >> $filesMP4
@@ -169,6 +210,7 @@ procesar() {
     rm -fr "$folder_data$base.$r_default.m3u8"
     rm -fr "$folder_data$output"
     rm -fr "$folder_data$file_m3u8"
+    rm -fr "$folder_parts"
 
     exit 0
 
