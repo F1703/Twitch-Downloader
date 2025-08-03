@@ -127,9 +127,9 @@ procesar() {
     max_retries=4
     fail_log=$(mktemp)
 
-    echo "$ts_list" | nl | xargs -n2 -P "$hilos" -I {} bash -c '
+    echo "$ts_list" | nl | xargs -P "$hilos" -I {} bash -c '
         line=($0)
-        num=${line[0]}
+        num=$(printf "%04d" "${line[0]}")
         part=${line[1]}
         part_path="'"$folder_parts"'$part.mp4"
 
@@ -187,7 +187,7 @@ procesar() {
     
     # GENERANDO LISTADO DE TS DESCARGADOS
     filesMP4=$vodID"_"$r_default"/files.txt" 
-    echo "$ts_list" | xargs -n1 -I {} echo "file 'parts/{}.mp4'" >> $filesMP4
+    echo "$ts_list" | xargs -I {} echo "file 'parts/{}.mp4'" >> $filesMP4
 
     # UNIENDO VIDEOS
     logInfo=$folder_data"ffmpeg.log"
